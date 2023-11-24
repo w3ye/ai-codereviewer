@@ -4,12 +4,51 @@ import OpenAI from "openai";
 import { Octokit } from "@octokit/action";
 import parseDiff, { Chunk, File } from "parse-diff";
 import { minimatch } from "minimatch";
+import { throttling } from "@octokit/plugin-throttling";
+import { retry } from "@octokit/plugin-retry";
 
-const GITHUB_TOKEN: string = core.getInput("GITHUB_TOKEN");
+const GITHUB_TOKEN: string | undefined =
+  core.getInput("GITHUB_TOKEN") || process.env.GITHUB_TOKEN;
 const OPENAI_API_KEY: string = core.getInput("OPENAI_API_KEY");
 const OPENAI_API_MODEL: string = core.getInput("OPENAI_API_MODEL");
 
-const octokit = new Octokit({ auth: GITHUB_TOKEN });
+const RetryAndThrottlingOctokit = Octokit.plugin(throttling, retry);
+
+const octokit = new RetryAndThrottlingOctokit({
+  auth: `token ${GITHUB_TOKEN}`,
+  throttle: {
+    onRateLimit: (
+      retryAfter: number,
+      options: any,
+      _o: any,
+      retryCount: number
+    ) => {
+      core.warning(
+        `Request quota exhausted for request ${options.method} ${options.url}
+Retry after: ${retryAfter} seconds
+Retry count: ${retryCount}
+`
+      );
+      if (retryCount <= 3) {
+        core.warning(`Retrying after ${retryAfter} seconds!`);
+        return true;
+      }
+    },
+    onSecondaryRateLimit: (retryAfter: number, options: any) => {
+      core.warning(
+        `SecondaryRateLimit detected for request ${options.method} ${options.url} ; retry after ${retryAfter} seconds`
+      );
+      // if we are doing a POST method on /repos/{owner}/{repo}/pulls/{pull_number}/reviews then we shouldn't retry
+      if (
+        options.method === "POST" &&
+        options.url.match(/\/repos\/.*\/.*\/pulls\/.*\/reviews/)
+      ) {
+        return false;
+      }
+      return true;
+    },
+  },
+});
 
 const openai = new OpenAI({
   apiKey: OPENAI_API_KEY,
